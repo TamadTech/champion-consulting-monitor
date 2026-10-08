@@ -1,0 +1,8 @@
+{
+  "name": "champion-public-monitor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/champion/*.test.ts"
+  }
+}

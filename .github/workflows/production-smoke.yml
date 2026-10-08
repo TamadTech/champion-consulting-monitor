@@ -1,0 +1,80 @@
+name: Champion production availability
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      alert_test:
+        description: Send a clearly labeled test alert without disrupting production
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: champion-production-availability
+  cancel-in-progress: false
+jobs:
+  availability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Check public routes and anonymous access boundaries
+        env:
+          PRODUCTION_ORIGIN: https://champion-consulting-v2-two.vercel.app
+        run: node --experimental-strip-types scripts/production-smoke.ts
+      - name: Exercise alert path on request
+        if: github.event_name == 'workflow_dispatch' && inputs.alert_test
+        run: |
+          echo "::error::Intentional monitoring drill; production has not been disrupted."
+          exit 1
+      - name: Open or recover availability alert
+        if: always() && !cancelled()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        env:
+          MONITOR_FAILED: ${{ job.status == 'failure' }}
+          MONITOR_DRILL: ${{ github.event_name == 'workflow_dispatch' && inputs.alert_test }}
+        with:
+          script: |
+            const drill = process.env.MONITOR_DRILL === 'true';
+            const failed = process.env.MONITOR_FAILED === 'true';
+            const title = drill
+              ? '[Champion monitor TEST] Alert delivery verification'
+              : '[Champion monitor] Production availability failure';
+            const marker = '<!-- champion-production-availability -->';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo, state: 'open', creator: 'github-actions[bot]', per_page: 100
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title && issue.body?.includes(marker));
+            if (failed) {
+              if (!existing) {
+                const body = [
+                  marker,
+                  '@TamadTech',
+                  drill ? '**TEST ALERT — production was not disrupted.**' : '**Production availability checks failed.**',
+                  `Run: ${runUrl}`,
+                  'Review the failed check and confirm receipt. No credentials or customer records are included.',
+                  drill ? 'Close this test issue after verification.' : 'This issue will close automatically after a successful availability run.'
+                ].join('\n\n');
+                const {data} = await github.rest.issues.create({...context.repo, title, body});
+                core.notice(`Monitor alert: ${data.html_url}`);
+              } else {
+                core.notice(`Existing open alert: ${existing.html_url}; duplicate notification suppressed.`);
+              }
+            } else if (!drill && existing) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: existing.number,
+                body: `Availability recovered. All checks passed: ${runUrl}`
+              });
+              await github.rest.issues.update({...context.repo, issue_number: existing.number, state: 'closed', state_reason: 'completed'});
+            }

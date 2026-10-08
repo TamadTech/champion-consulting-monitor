@@ -1,0 +1,48 @@
+name: Champion runtime error alerts
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: champion-runtime-errors
+  cancel-in-progress: false
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Check durable server error signal
+        run: node --experimental-strip-types scripts/runtime-check.ts
+      - name: Open or recover runtime alert
+        if: always() && !cancelled()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        env:
+          MONITOR_FAILED: ${{ job.status == 'failure' }}
+        with:
+          script: |
+            const title = '[Champion runtime] Server error requires review';
+            const marker = '<!-- champion-runtime-errors -->';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {...context.repo, state:'open', creator:'github-actions[bot]', per_page:100});
+            const existing = issues.find(i => !i.pull_request && i.title === title && i.body?.includes(marker));
+            if (process.env.MONITOR_FAILED === 'true') {
+              if (!existing) {
+                const {data} = await github.rest.issues.create({...context.repo,title,body:[marker,'@TamadTech','A server error, labeled monitoring drill, or unavailable error monitor needs review.',`Run: ${runUrl}`,'The run summary distinguishes the drill flag. Investigate Vercel logs, then acknowledge only the reviewed signal using the private application recovery runbook. Closing this issue alone does not acknowledge the signal. No customer information is included.'].join('\n\n')});
+                core.notice(`Runtime alert: ${data.html_url}`);
+              } else core.notice(`Existing alert: ${existing.html_url}; duplicate suppressed.`);
+            } else if (existing) {
+              await github.rest.issues.createComment({...context.repo,issue_number:existing.number,body:`Runtime monitor recovered and no unacknowledged errors remain: ${runUrl}`});
+              await github.rest.issues.update({...context.repo,issue_number:existing.number,state:'closed',state_reason:'completed'});
+            }
